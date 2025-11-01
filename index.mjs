@@ -164,18 +164,29 @@ export async function AnthropicAuthPlugin({ client }) {
                 auth.access = json.access_token;
                 auth.has1MContext = has1MContext;
               }
+              const body = (() => {
+                try {
+                  return typeof init.body === "string"
+                    ? JSON.parse(init.body)
+                    : init.body;
+                } catch {
+                  return {};
+                }
+              })();
+              const betaFeatures = [
+                "oauth-2025-04-20",
+                "claude-code-20250219",
+                "interleaved-thinking-2025-05-14",
+                "fine-grained-tool-streaming-2025-05-14",
+                // Only add context-1m header if model starts with "claude-sonnet-" and has1MContext is true
+                auth.has1MContext &&
+                  body.model?.startsWith("claude-sonnet-") &&
+                  "context-1m-2025-08-07",
+              ].filter(Boolean);
               const headers = {
                 ...init.headers,
                 authorization: `Bearer ${auth.access}`,
-                "anthropic-beta": [
-                  "oauth-2025-04-20",
-                  "claude-code-20250219",
-                  "interleaved-thinking-2025-05-14",
-                  "fine-grained-tool-streaming-2025-05-14",
-                  auth.has1MContext && "context-1m-2025-08-07",
-                ]
-                  .filter(Boolean)
-                  .join(","),
+                "anthropic-beta": betaFeatures.join(","),
               };
               delete headers["x-api-key"];
               return fetch(input, {
