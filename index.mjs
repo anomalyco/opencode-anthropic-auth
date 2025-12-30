@@ -74,6 +74,7 @@ export async function AnthropicAuthPlugin({ client }) {
       provider: "anthropic",
       async loader(getAuth, provider) {
         const auth = await getAuth();
+        if (!auth) return {};
         if (auth.type === "oauth") {
           // zero out cost for max plan
           for (const model of Object.values(provider.models)) {
