@@ -151,10 +151,58 @@ export async function AnthropicAuthPlugin({ client }) {
                 "anthropic-beta": mergedBetas,
               };
               delete headers["x-api-key"];
-              return fetch(input, {
+
+              const TOOL_PREFIX = "oc_";
+              let body = init.body;
+              if (body && typeof body === "string") {
+                try {
+                  const parsed = JSON.parse(body);
+                  if (parsed.tools && Array.isArray(parsed.tools)) {
+                    parsed.tools = parsed.tools.map((tool) => ({
+                      ...tool,
+                      name: tool.name ? `${TOOL_PREFIX}${tool.name}` : tool.name,
+                    }));
+                    body = JSON.stringify(parsed);
+                  }
+                } catch (e) {
+                  // ignore parse errors
+                }
+              }
+
+              const response = await fetch(input, {
                 ...init,
+                body,
                 headers,
               });
+
+              // Transform streaming response to rename tools back
+              if (response.body) {
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                const encoder = new TextEncoder();
+
+                const stream = new ReadableStream({
+                  async pull(controller) {
+                    const { done, value } = await reader.read();
+                    if (done) {
+                      controller.close();
+                      return;
+                    }
+
+                    let text = decoder.decode(value, { stream: true });
+                    text = text.replace(/"name"\s*:\s*"oc_([^"]+)"/g, '"name": "$1"');
+                    controller.enqueue(encoder.encode(text));
+                  },
+                });
+
+                return new Response(stream, {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: response.headers,
+                });
+              }
+
+              return response;
             },
           };
         }
