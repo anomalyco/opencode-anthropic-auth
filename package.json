@@ -1,6 +1,6 @@
 {
   "name": "opencode-anthropic-auth",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "main": "./index.mjs",
   "devDependencies": {
     "@opencode-ai/plugin": "^0.4.45"
