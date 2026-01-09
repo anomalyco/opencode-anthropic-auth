@@ -179,18 +179,33 @@ export async function AnthropicAuthPlugin({ client }) {
               );
               requestHeaders.delete("x-api-key");
 
-              const TOOL_PREFIX = "oc_";
+              const TOOL_PREFIX = "mcp_";
               let body = requestInit.body;
               if (body && typeof body === "string") {
                 try {
                   const parsed = JSON.parse(body);
+                  // Add prefix to tools definitions
                   if (parsed.tools && Array.isArray(parsed.tools)) {
                     parsed.tools = parsed.tools.map((tool) => ({
                       ...tool,
                       name: tool.name ? `${TOOL_PREFIX}${tool.name}` : tool.name,
                     }));
-                    body = JSON.stringify(parsed);
                   }
+                  // Add prefix to tool_use blocks in messages
+                  if (parsed.messages && Array.isArray(parsed.messages)) {
+                    parsed.messages = parsed.messages.map((msg) => {
+                      if (msg.content && Array.isArray(msg.content)) {
+                        msg.content = msg.content.map((block) => {
+                          if (block.type === "tool_use" && block.name) {
+                            return { ...block, name: `${TOOL_PREFIX}${block.name}` };
+                          }
+                          return block;
+                        });
+                      }
+                      return msg;
+                    });
+                  }
+                  body = JSON.stringify(parsed);
                 } catch (e) {
                   // ignore parse errors
                 }
@@ -241,7 +256,7 @@ export async function AnthropicAuthPlugin({ client }) {
                     }
 
                     let text = decoder.decode(value, { stream: true });
-                    text = text.replace(/"name"\s*:\s*"oc_([^"]+)"/g, '"name": "$1"');
+                    text = text.replace(/"name"\s*:\s*"mcp_([^"]+)"/g, '"name": "$1"');
                     controller.enqueue(encoder.encode(text));
                   },
                 });
