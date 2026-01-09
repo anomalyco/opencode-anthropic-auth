@@ -21,7 +21,7 @@ async function authorize(mode) {
   );
   url.searchParams.set(
     "scope",
-    "org:create_api_key user:profile user:inference",
+    "org:create_api_key user:profile user:inference user:sessions:claude_code",
   );
   url.searchParams.set("code_challenge", pkce.challenge);
   url.searchParams.set("code_challenge_method", "S256");
