@@ -43,6 +43,7 @@ const TOOL_NAME_CACHE = new Map();
 const TOOL_PREFIX_REGEX = /^(?:oc_|mcp_)/i;
 
 let cachedMetadataUserIdPromise;
+let tokenRefreshPromise = null;
 
 // ============================================================================
 // Debug Logging
@@ -283,7 +284,7 @@ function replaceToolNamesInText(text) {
   let output = text.replace(/"name"\s*:\s*"(?:oc_|mcp_)([^"]+)"/g, '"name": "$1"');
 
   output = output.replace(
-    /"name"\s*:\s*"(Bash|Read|Edit|Write|Task|Glob|Grep|WebFetch|WebSearch|TodoWrite)"/g,
+    /"name"\s*:\s*"(Bash|Read|Edit|Write|Task|Glob|Grep|WebFetch|WebSearch|TodoWrite|AskUserQuestion)"/g,
     (_, name) => `"name": "${normalizeToolNameForOpenCode(name)}"`,
   );
 
@@ -397,6 +398,11 @@ function createTransformedResponse(response) {
     async pull(controller) {
       const { done, value } = await reader.read();
       if (done) {
+        // Flush any remaining bytes from the decoder
+        const flushed = decoder.decode(new Uint8Array(), { stream: false });
+        if (flushed) {
+          buffer += flushed;
+        }
         // Process any remaining buffered content
         if (buffer.length > 0) {
           controller.enqueue(encoder.encode(replaceToolNamesInText(buffer)));
@@ -657,7 +663,7 @@ async function authorize(mode) {
   url.searchParams.set("client_id", CLIENT_ID);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("redirect_uri", "https://console.anthropic.com/oauth/code/callback");
-  url.searchParams.set("scope", "org:create_api_key user:profile user:inference");
+  url.searchParams.set("scope", "org:create_api_key user:profile user:inference user:sessions:claude_code");
   url.searchParams.set("code_challenge", pkce.challenge);
   url.searchParams.set("code_challenge_method", "S256");
   url.searchParams.set("state", pkce.verifier);
@@ -728,17 +734,30 @@ export async function AnthropicAuthPlugin({ client }) {
               const baseFetch = getBaseFetch();
 
               if (!auth.access || auth.expires < Date.now()) {
-                const json = await refreshOAuthToken(auth, baseFetch);
-                await client.auth.set({
-                  path: { id: "anthropic" },
-                  body: {
-                    type: "oauth",
-                    refresh: json.refresh_token,
-                    access: json.access_token,
-                    expires: Date.now() + json.expires_in * 1000,
-                  },
-                });
-                auth.access = json.access_token;
+                // Prevent race condition: cache the refresh promise
+                if (!tokenRefreshPromise) {
+                  tokenRefreshPromise = (async () => {
+                    try {
+                      const json = await refreshOAuthToken(auth, baseFetch);
+                      const newExpires = Date.now() + json.expires_in * 1000;
+                      await client.auth.set({
+                        path: { id: "anthropic" },
+                        body: {
+                          type: "oauth",
+                          refresh: json.refresh_token,
+                          access: json.access_token,
+                          expires: newExpires,
+                        },
+                      });
+                      auth.access = json.access_token;
+                      auth.expires = newExpires;
+                      return json;
+                    } finally {
+                      tokenRefreshPromise = null;
+                    }
+                  })();
+                }
+                await tokenRefreshPromise;
               }
 
               return handleAnthropicRequest(input, init, auth, baseFetch);
