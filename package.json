@@ -1,7 +1,25 @@
 {
   "name": "opencode-anthropic-auth",
   "version": "0.0.9",
+  "description": "Anthropic auth plugin for OpenCode",
   "main": "./index.mjs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anomalyco/opencode-anthropic-auth.git"
+  },
+  "homepage": "https://github.com/anomalyco/opencode-anthropic-auth",
+  "bugs": {
+    "url": "https://github.com/anomalyco/opencode-anthropic-auth/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "anthropic",
+    "auth",
+    "opencode",
+    "openauth",
+    "plugin"
+  ],
+  "author": "anomalyco",
   "devDependencies": {
     "@opencode-ai/plugin": "^0.4.45"
   },
