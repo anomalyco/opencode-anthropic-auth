@@ -96,6 +96,19 @@ function toSnakeCase(value) {
     .toLowerCase();
 }
 
+function toCamelCase(value) {
+  if (!value) return value;
+  return value.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+}
+
+// Map of snake_case -> camelCase for tool parameters we convert
+const PARAM_NAME_MAP = new Map([
+  ["file_path", "filePath"],
+  ["old_string", "oldString"],
+  ["new_string", "newString"],
+  ["replace_all", "replaceAll"],
+]);
+
 function getBaseFetch() {
   return BASE_FETCH ?? globalThis.fetch;
 }
@@ -371,6 +384,16 @@ function replaceToolNamesInText(text) {
     output = output.replace(
       new RegExp(`"model"\\s*:\\s*"${escapeRegExp(full)}"`, "g"),
       `"model": "${base}"`,
+    );
+  }
+
+  // Convert snake_case parameter names back to camelCase in tool_use input
+  // This is needed because we convert camelCase -> snake_case in requests
+  for (const [snake, camel] of PARAM_NAME_MAP.entries()) {
+    // Match "param_name": at the start of a key in JSON
+    output = output.replace(
+      new RegExp(`"${snake}"\\s*:`, "g"),
+      `"${camel}":`,
     );
   }
 
