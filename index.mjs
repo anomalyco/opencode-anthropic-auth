@@ -153,9 +153,13 @@ function applyStainlessHeaders(headers, isStream = false) {
   }
 }
 
-function getBetaHeadersForPath(pathname) {
+function getBetaHeadersForPath(pathname, hasTools = false) {
   if (pathname === "/v1/messages") {
-    return ["claude-code-20250219", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"];
+    // Claude Code only includes claude-code-20250219 when tools are present
+    if (hasTools) {
+      return ["claude-code-20250219", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"];
+    }
+    return ["oauth-2025-04-20", "interleaved-thinking-2025-05-14"];
   }
   if (pathname === "/v1/messages/count_tokens") {
     return [
@@ -604,14 +608,6 @@ async function handleAnthropicRequest(input, init, auth, baseFetch) {
   
   const requestHeaders = mergeHeaders(input instanceof Request ? input : null, init);
 
-  // Beta headers
-  const betaHeaders = getBetaHeadersForPath(requestUrl.pathname);
-  if (betaHeaders.length > 0) {
-    requestHeaders.set("anthropic-beta", betaHeaders.join(","));
-  } else {
-    requestHeaders.delete("anthropic-beta");
-  }
-
   // Auth & stainless headers
   requestHeaders.set("authorization", `Bearer ${auth.access}`);
   requestHeaders.delete("x-api-key");
@@ -630,10 +626,14 @@ async function handleAnthropicRequest(input, init, auth, baseFetch) {
   }
 
   let isStream = false;
+  let hasTools = false;
   if (body && typeof body === "string") {
     try {
+      const parsed = JSON.parse(body);
+      // Check if tools array has items BEFORE normalization
+      hasTools = Array.isArray(parsed.tools) && parsed.tools.length > 0;
       const result = await normalizeRequestBody(
-        JSON.parse(body),
+        parsed,
         requestUrl.pathname === "/v1/messages",
       );
       body = JSON.stringify(result.body);
@@ -641,6 +641,14 @@ async function handleAnthropicRequest(input, init, auth, baseFetch) {
     } catch (error) {
       debugLog("handleAnthropicRequest.normalizeBody", error);
     }
+  }
+
+  // Set beta headers AFTER body parsing to know if tools are present
+  const betaHeaders = getBetaHeadersForPath(requestUrl.pathname, hasTools);
+  if (betaHeaders.length > 0) {
+    requestHeaders.set("anthropic-beta", betaHeaders.join(","));
+  } else {
+    requestHeaders.delete("anthropic-beta");
   }
 
   applyStainlessHeaders(requestHeaders, isStream);
@@ -894,12 +902,22 @@ export async function AnthropicAuthPlugin({ client }) {
       const options = output.options ?? {};
       output.options = options;
 
-      // Headers
+      // Tools & messages - match Claude Code behavior
+      // Must normalize tools BEFORE setting headers (to determine hasTools)
+      const hasTools = Array.isArray(options.tools) && options.tools.length > 0;
+      if (options.tools) {
+        options.tools = normalizeTools(options.tools);
+      } else {
+        options.tools = [];
+      }
+      if (Array.isArray(options.messages)) options.messages = normalizeMessagesForClaude(options.messages);
+
+      // Headers - set AFTER knowing if tools are present
       const headers = options.headers instanceof Headers
         ? options.headers
         : new Headers(options.headers ?? {});
 
-      const betaHeaders = getBetaHeadersForPath("/v1/messages");
+      const betaHeaders = getBetaHeadersForPath("/v1/messages", hasTools);
       headers.set("anthropic-beta", betaHeaders.join(","));
       applyStainlessHeaders(headers, !!options.stream);
 
@@ -915,14 +933,6 @@ export async function AnthropicAuthPlugin({ client }) {
       if (options.model || input.model?.id) {
         options.model = normalizeModelId(options.model ?? input.model?.id);
       }
-
-      // Tools & messages - match Claude Code behavior
-      if (options.tools) {
-        options.tools = normalizeTools(options.tools);
-      } else {
-        options.tools = [];
-      }
-      if (Array.isArray(options.messages)) options.messages = normalizeMessagesForClaude(options.messages);
 
       // Remove temperature - Claude Code doesn't send it
       if ("temperature" in options) delete options.temperature;
