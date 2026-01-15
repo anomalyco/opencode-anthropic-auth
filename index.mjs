@@ -257,6 +257,39 @@ function sanitizeToolDescription(description) {
 }
 
 /**
+ * Convert tool input_schema property names from camelCase to snake_case.
+ * Claude Code sends snake_case parameter names (e.g., file_path, old_string).
+ */
+function normalizeToolInputSchema(inputSchema) {
+  if (!inputSchema || typeof inputSchema !== "object") return inputSchema;
+  if (!inputSchema.properties) return inputSchema;
+
+  const result = { ...inputSchema };
+  const newProperties = {};
+
+  for (const [key, value] of Object.entries(result.properties)) {
+    const snakeKey = toSnakeCase(key);
+    newProperties[snakeKey] = value;
+    // Cache the mapping for reverse conversion in responses
+    if (snakeKey !== key) {
+      if (TOOL_NAME_CACHE.size >= TOOL_NAME_CACHE_MAX_SIZE) {
+        const firstKey = TOOL_NAME_CACHE.keys().next().value;
+        TOOL_NAME_CACHE.delete(firstKey);
+      }
+      TOOL_NAME_CACHE.set(snakeKey, key);
+    }
+  }
+
+  result.properties = newProperties;
+
+  if (Array.isArray(result.required)) {
+    result.required = result.required.map(toSnakeCase);
+  }
+
+  return result;
+}
+
+/**
  * Normalize a single tool object for Claude compatibility.
  */
 function normalizeTool(tool) {
@@ -274,10 +307,10 @@ function normalizeTool(tool) {
     normalized.description = sanitizeToolDescription(normalized.description);
   }
 
-  // Note: We do NOT convert parameter names to snake_case because:
-  // 1. Claude Code uses camelCase for parameters (verified in HAR analysis)
-  // 2. OpenCode expects camelCase in tool_use responses
-  // 3. Converting creates a mismatch that breaks tool execution
+  // Convert parameter names to snake_case (Claude Code uses snake_case)
+  if (normalized.input_schema) {
+    normalized.input_schema = normalizeToolInputSchema(normalized.input_schema);
+  }
 
   return normalized;
 }
@@ -331,11 +364,25 @@ function replaceToolNamesInText(text) {
     (_, name) => `"name": "${normalizeToolNameForOpenCode(name)}"`,
   );
 
-  for (const [pascal, original] of TOOL_NAME_CACHE.entries()) {
-    if (pascal && pascal !== original) {
+  // Reverse mappings from cache (handles both tool names and parameter names)
+  for (const [mapped, original] of TOOL_NAME_CACHE.entries()) {
+    if (mapped && mapped !== original) {
+      // Tool names: "name": "PascalName" → "name": "original_name"
       output = output.replace(
-        new RegExp(`"name"\\s*:\\s*"${escapeRegExp(pascal)}"`, "g"),
+        new RegExp(`"name"\\s*:\\s*"${escapeRegExp(mapped)}"`, "g"),
         `"name": "${original}"`,
+      );
+      // Parameter names in input: "snake_case": → "camelCase":
+      // Handle both regular JSON and escaped JSON in partial_json strings
+      // Regular: "file_path":
+      output = output.replace(
+        new RegExp(`"${escapeRegExp(mapped)}"\\s*:`, "g"),
+        `"${original}":`,
+      );
+      // Escaped (in partial_json): \"file_path\":
+      output = output.replace(
+        new RegExp(`\\\\"${escapeRegExp(mapped)}\\\\"\\s*:`, "g"),
+        `\\"${original}\\":`,
       );
     }
   }
@@ -365,6 +412,48 @@ function stripCacheControlFromSystem(system) {
   });
 }
 
+/**
+ * Apply common Claude API normalizations to a request body/options object.
+ * Mutates the object in place for efficiency.
+ * @param {Object} body - Request body or options object to normalize
+ * @param {Object} options - Configuration options
+ * @param {string|null} options.modelFallback - Fallback model ID if body.model is not set
+ */
+function applyClaudeNormalization(body, { modelFallback = null } = {}) {
+  // Normalize model
+  const modelId = body.model || modelFallback;
+  if (modelId) {
+    body.model = normalizeModelId(modelId);
+  }
+
+  // Normalize tools - ensure empty array if not present (Claude Code always sends tools)
+  if (body.tools) {
+    body.tools = normalizeTools(body.tools);
+  } else {
+    body.tools = [];
+  }
+
+  // Normalize messages
+  if (Array.isArray(body.messages)) {
+    body.messages = normalizeMessagesForClaude(body.messages);
+  }
+
+  // Remove temperature - Claude Code doesn't send it
+  if ("temperature" in body) {
+    delete body.temperature;
+  }
+
+  // Remove cache_control from system blocks - Claude Code doesn't use it
+  if (Array.isArray(body.system)) {
+    body.system = stripCacheControlFromSystem(body.system);
+  }
+
+  // OAuth API does not support tool_choice - remove to prevent API errors
+  if (body.tool_choice) {
+    delete body.tool_choice;
+  }
+}
+
 async function normalizeRequestBody(parsed, injectMetadata = false) {
   // Sanitize system prompt - server blocks "OpenCode" string
   if (parsed.system && Array.isArray(parsed.system)) {
@@ -381,36 +470,8 @@ async function normalizeRequestBody(parsed, injectMetadata = false) {
     });
   }
 
-  if (parsed.model) {
-    parsed.model = normalizeModelId(parsed.model);
-  }
-
-  // Normalize tools - ensure empty array if not present (Claude Code always sends tools)
-  if (parsed.tools) {
-    parsed.tools = normalizeTools(parsed.tools);
-  } else {
-    parsed.tools = [];
-  }
-
-  if (Array.isArray(parsed.messages)) {
-    parsed.messages = normalizeMessagesForClaude(parsed.messages);
-  }
-
-  // Remove temperature - Claude Code doesn't send it
-  if ("temperature" in parsed) {
-    delete parsed.temperature;
-  }
-
-  // Remove cache_control from system blocks - Claude Code doesn't use it
-  if (Array.isArray(parsed.system)) {
-    parsed.system = stripCacheControlFromSystem(parsed.system);
-  }
-
-  // OAuth API does not support tool_choice parameter - must be removed
-  // to prevent "invalid_request_error" from Anthropic API
-  if (parsed.tool_choice) {
-    delete parsed.tool_choice;
-  }
+  // Apply common Claude normalizations
+  applyClaudeNormalization(parsed);
 
   if (injectMetadata) {
     const userId = await resolveMetadataUserId();
@@ -875,15 +936,11 @@ export async function AnthropicAuthPlugin({ client }) {
       const options = output.options ?? {};
       output.options = options;
 
-      // Tools & messages - match Claude Code behavior
-      // Must normalize tools BEFORE setting headers (to determine hasTools)
+      // Check hasTools BEFORE normalization (applyClaudeNormalization sets empty array)
       const hasTools = Array.isArray(options.tools) && options.tools.length > 0;
-      if (options.tools) {
-        options.tools = normalizeTools(options.tools);
-      } else {
-        options.tools = [];
-      }
-      if (Array.isArray(options.messages)) options.messages = normalizeMessagesForClaude(options.messages);
+
+      // Apply common Claude normalizations
+      applyClaudeNormalization(options, { modelFallback: input.model?.id });
 
       // Headers - set AFTER knowing if tools are present
       const headers = options.headers instanceof Headers
@@ -901,22 +958,6 @@ export async function AnthropicAuthPlugin({ client }) {
       if (userId) {
         options.metadata = { ...(options.metadata ?? {}), user_id: userId };
       }
-
-      // Model
-      if (options.model || input.model?.id) {
-        options.model = normalizeModelId(options.model ?? input.model?.id);
-      }
-
-      // Remove temperature - Claude Code doesn't send it
-      if ("temperature" in options) delete options.temperature;
-
-      // Remove cache_control from system blocks - Claude Code doesn't use it
-      if (Array.isArray(options.system)) {
-        options.system = stripCacheControlFromSystem(options.system);
-      }
-
-      // OAuth API does not support tool_choice - remove to prevent API errors
-      if (options.tool_choice) delete options.tool_choice;
     },
   };
 }
