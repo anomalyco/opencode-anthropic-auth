@@ -624,47 +624,73 @@ function createTransformedResponse(response) {
 
   const stream = new ReadableStream({
     async pull(controller) {
-      const { done, value } = await reader.read();
-      if (done) {
-        // Flush any remaining bytes from the decoder
-        const flushed = decoder.decode(new Uint8Array(), { stream: false });
-        if (flushed) {
-          buffer += flushed;
+      // Loop until we have something to emit or stream ends
+      // This prevents hanging when buffering input_json_delta events
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          // Flush any remaining bytes from the decoder
+          const flushed = decoder.decode(new Uint8Array(), { stream: false });
+          if (flushed) {
+            buffer += flushed;
+          }
+          // Process any remaining buffered content
+          if (buffer.length > 0) {
+            const { output } = processSSEEvent(buffer, toolInputBuffers);
+            if (output) {
+              controller.enqueue(encoder.encode(output));
+            }
+          }
+          // Flush any remaining tool input buffers
+          for (const [index, bufferedJson] of toolInputBuffers.entries()) {
+            try {
+              const parsedInput = JSON.parse(bufferedJson);
+              const transformedInput = convertToolInputKeys(parsedInput);
+              const syntheticDelta = {
+                type: "content_block_delta",
+                index,
+                delta: {
+                  type: "input_json_delta",
+                  partial_json: JSON.stringify(transformedInput),
+                },
+              };
+              const deltaEvent = reconstructSSEEvent("content_block_delta", syntheticDelta);
+              controller.enqueue(encoder.encode(deltaEvent + "\n\n"));
+            } catch (e) {
+              debugLog("createTransformedResponse.flushToolBuffers", e);
+            }
+          }
+          toolInputBuffers.clear();
+          controller.close();
+          return;
         }
-        // Process any remaining buffered content
-        if (buffer.length > 0) {
-          const { output } = processSSEEvent(buffer, toolInputBuffers);
-          if (output) {
-            controller.enqueue(encoder.encode(output));
+        
+        buffer += decoder.decode(value, { stream: true });
+        
+        // SSE events are separated by double newlines
+        // Process only complete events, keep incomplete ones in buffer
+        const events = buffer.split("\n\n");
+        
+        // Keep the last potentially incomplete event in buffer
+        buffer = events.pop() ?? "";
+        
+        // Process each complete event
+        const outputs = [];
+        for (const eventText of events) {
+          if (!eventText.trim()) continue;
+          
+          const { output, emit } = processSSEEvent(eventText, toolInputBuffers);
+          if (emit && output) {
+            outputs.push(output);
           }
         }
-        controller.close();
-        return;
-      }
-      
-      buffer += decoder.decode(value, { stream: true });
-      
-      // SSE events are separated by double newlines
-      // Process only complete events, keep incomplete ones in buffer
-      const events = buffer.split("\n\n");
-      
-      // Keep the last potentially incomplete event in buffer
-      buffer = events.pop() ?? "";
-      
-      // Process each complete event
-      const outputs = [];
-      for (const eventText of events) {
-        if (!eventText.trim()) continue;
         
-        const { output, emit } = processSSEEvent(eventText, toolInputBuffers);
-        if (emit && output) {
-          outputs.push(output);
+        // Emit all outputs and return (let pull be called again)
+        if (outputs.length > 0) {
+          controller.enqueue(encoder.encode(outputs.join("\n\n") + "\n\n"));
+          return;
         }
-      }
-      
-      // Emit all outputs
-      if (outputs.length > 0) {
-        controller.enqueue(encoder.encode(outputs.join("\n\n") + "\n\n"));
+        // If no outputs, continue loop to read more data
       }
     },
   });
