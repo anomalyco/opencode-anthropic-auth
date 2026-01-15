@@ -373,16 +373,10 @@ function replaceToolNamesInText(text) {
         `"name": "${original}"`,
       );
       // Parameter names in input: "snake_case": → "camelCase":
-      // Handle both regular JSON and escaped JSON in partial_json strings
-      // Regular: "file_path":
+      // Note: partial_json content is now handled by buffering in processSSEEvent
       output = output.replace(
         new RegExp(`"${escapeRegExp(mapped)}"\\s*:`, "g"),
         `"${original}":`,
-      );
-      // Escaped (in partial_json): \"file_path\":
-      output = output.replace(
-        new RegExp(`\\\\"${escapeRegExp(mapped)}\\\\"\\s*:`, "g"),
-        `\\"${original}\\":`,
       );
     }
   }
@@ -488,6 +482,133 @@ async function normalizeRequestBody(parsed, injectMetadata = false) {
   return { body: parsed, isStream: !!parsed.stream };
 }
 
+/**
+ * Convert snake_case keys to camelCase in a tool input object.
+ * Uses TOOL_NAME_CACHE for mapping.
+ */
+function convertToolInputKeys(input) {
+  if (!input || typeof input !== "object") return input;
+  
+  const result = {};
+  for (const [key, value] of Object.entries(input)) {
+    // Look up camelCase version from cache, fallback to original key
+    const camelKey = TOOL_NAME_CACHE.get(key) ?? key;
+    result[camelKey] = value;
+  }
+  return result;
+}
+
+/**
+ * Parse SSE event text and extract type and data.
+ * Returns { eventType, data } or null if not a data event.
+ */
+function parseSSEEvent(eventText) {
+  const lines = eventText.split("\n");
+  let eventType = null;
+  let dataLine = null;
+  
+  for (const line of lines) {
+    if (line.startsWith("event:")) {
+      eventType = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLine = line.slice(5).trim();
+    }
+  }
+  
+  if (!dataLine) return null;
+  
+  try {
+    return { eventType, data: JSON.parse(dataLine) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reconstruct SSE event text from parsed data.
+ */
+function reconstructSSEEvent(eventType, data) {
+  const lines = [];
+  if (eventType) {
+    lines.push(`event: ${eventType}`);
+  }
+  lines.push(`data: ${JSON.stringify(data)}`);
+  return lines.join("\n");
+}
+
+/**
+ * Process a single SSE event, handling tool input buffering and transformation.
+ * Returns { output, emit } where output is the text to emit (or null to suppress)
+ * and emit is whether to emit now or buffer.
+ */
+function processSSEEvent(eventText, toolInputBuffers) {
+  const parsed = parseSSEEvent(eventText);
+  
+  // If we can't parse, apply basic text replacement and pass through
+  if (!parsed) {
+    return { output: replaceToolNamesInText(eventText), emit: true };
+  }
+  
+  const { data } = parsed;
+  const eventType = data.type;
+  
+  // Handle input_json_delta: buffer the partial_json, suppress emission
+  if (eventType === "content_block_delta" && data.delta?.type === "input_json_delta") {
+    const index = data.index;
+    const partialJson = data.delta.partial_json ?? "";
+    
+    // Accumulate partial_json
+    const existing = toolInputBuffers.get(index) ?? "";
+    toolInputBuffers.set(index, existing + partialJson);
+    
+    // Don't emit this event - we'll emit transformed version at content_block_stop
+    return { output: null, emit: false };
+  }
+  
+  // Handle content_block_stop: emit buffered & transformed tool input
+  if (eventType === "content_block_stop") {
+    const index = data.index;
+    const bufferedJson = toolInputBuffers.get(index);
+    
+    if (bufferedJson) {
+      // We have buffered tool input - transform and emit
+      toolInputBuffers.delete(index);
+      
+      try {
+        const parsedInput = JSON.parse(bufferedJson);
+        const transformedInput = convertToolInputKeys(parsedInput);
+        
+        // Emit a synthetic content_block_delta with the full transformed input
+        const syntheticDelta = {
+          type: "content_block_delta",
+          index,
+          delta: {
+            type: "input_json_delta",
+            partial_json: JSON.stringify(transformedInput),
+          },
+        };
+        
+        const deltaEvent = reconstructSSEEvent("content_block_delta", syntheticDelta);
+        const stopEvent = replaceToolNamesInText(eventText);
+        
+        // Emit both: the transformed delta, then the stop event
+        return { output: deltaEvent + "\n\n" + stopEvent, emit: true };
+      } catch (e) {
+        debugLog("processSSEEvent.parseBufferedJson", e);
+        // If parsing fails, emit original buffered content with text replacement
+        // This shouldn't happen in normal operation
+        toolInputBuffers.delete(index);
+      }
+    }
+    
+    // No buffered input or parse failed - just pass through with text replacement
+    return { output: replaceToolNamesInText(eventText), emit: true };
+  }
+  
+  // All other events: apply text replacement and pass through
+  return { output: replaceToolNamesInText(eventText), emit: true };
+}
+
 function createTransformedResponse(response) {
   if (!response.body) return response;
 
@@ -497,6 +618,9 @@ function createTransformedResponse(response) {
   
   // Buffer for incomplete SSE events (handles chunk boundary issues)
   let buffer = "";
+  
+  // Buffer for tool input JSON per content block index
+  const toolInputBuffers = new Map();
 
   const stream = new ReadableStream({
     async pull(controller) {
@@ -509,7 +633,10 @@ function createTransformedResponse(response) {
         }
         // Process any remaining buffered content
         if (buffer.length > 0) {
-          controller.enqueue(encoder.encode(replaceToolNamesInText(buffer)));
+          const { output } = processSSEEvent(buffer, toolInputBuffers);
+          if (output) {
+            controller.enqueue(encoder.encode(output));
+          }
         }
         controller.close();
         return;
@@ -524,10 +651,20 @@ function createTransformedResponse(response) {
       // Keep the last potentially incomplete event in buffer
       buffer = events.pop() ?? "";
       
-      // Process and emit complete events
-      if (events.length > 0) {
-        const completeData = events.join("\n\n") + "\n\n";
-        controller.enqueue(encoder.encode(replaceToolNamesInText(completeData)));
+      // Process each complete event
+      const outputs = [];
+      for (const eventText of events) {
+        if (!eventText.trim()) continue;
+        
+        const { output, emit } = processSSEEvent(eventText, toolInputBuffers);
+        if (emit && output) {
+          outputs.push(output);
+        }
+      }
+      
+      // Emit all outputs
+      if (outputs.length > 0) {
+        controller.enqueue(encoder.encode(outputs.join("\n\n") + "\n\n"));
       }
     },
   });
