@@ -70,6 +70,13 @@ async function exchange(code, verifier) {
  */
 export async function AnthropicAuthPlugin({ client }) {
   return {
+    "experimental.chat.system.transform": (input, output) => {
+      if (input.model.providerID === "anthropic") {
+        output.system.unshift(
+          "You are Claude Code, Anthropic's official CLI for Claude.",
+        );
+      }
+    },
     auth: {
       provider: "anthropic",
       async loader(getAuth, provider) {
@@ -147,7 +154,9 @@ export async function AnthropicAuthPlugin({ client }) {
                     }
                   }
                 } else {
-                  for (const [key, value] of Object.entries(requestInit.headers)) {
+                  for (const [key, value] of Object.entries(
+                    requestInit.headers,
+                  )) {
                     if (typeof value !== "undefined") {
                       requestHeaders.set(key, String(value));
                     }
@@ -187,13 +196,13 @@ export async function AnthropicAuthPlugin({ client }) {
 
                   // Sanitize system prompt - server blocks "OpenCode" string
                   if (parsed.system && Array.isArray(parsed.system)) {
-                    parsed.system = parsed.system.map(item => {
-                      if (item.type === 'text' && item.text) {
+                    parsed.system = parsed.system.map((item) => {
+                      if (item.type === "text" && item.text) {
                         return {
                           ...item,
                           text: item.text
-                            .replace(/OpenCode/g, 'Claude Code')
-                            .replace(/opencode/gi, 'Claude')
+                            .replace(/OpenCode/g, "Claude Code")
+                            .replace(/opencode/gi, "Claude"),
                         };
                       }
                       return item;
@@ -204,7 +213,9 @@ export async function AnthropicAuthPlugin({ client }) {
                   if (parsed.tools && Array.isArray(parsed.tools)) {
                     parsed.tools = parsed.tools.map((tool) => ({
                       ...tool,
-                      name: tool.name ? `${TOOL_PREFIX}${tool.name}` : tool.name,
+                      name: tool.name
+                        ? `${TOOL_PREFIX}${tool.name}`
+                        : tool.name,
                     }));
                   }
                   // Add prefix to tool_use blocks in messages
@@ -213,7 +224,10 @@ export async function AnthropicAuthPlugin({ client }) {
                       if (msg.content && Array.isArray(msg.content)) {
                         msg.content = msg.content.map((block) => {
                           if (block.type === "tool_use" && block.name) {
-                            return { ...block, name: `${TOOL_PREFIX}${block.name}` };
+                            return {
+                              ...block,
+                              name: `${TOOL_PREFIX}${block.name}`,
+                            };
                           }
                           return block;
                         });
@@ -272,7 +286,10 @@ export async function AnthropicAuthPlugin({ client }) {
                     }
 
                     let text = decoder.decode(value, { stream: true });
-                    text = text.replace(/"name"\s*:\s*"mcp_([^"]+)"/g, '"name": "$1"');
+                    text = text.replace(
+                      /"name"\s*:\s*"mcp_([^"]+)"/g,
+                      '"name": "$1"',
+                    );
                     controller.enqueue(encoder.encode(text));
                   },
                 });
