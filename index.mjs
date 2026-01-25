@@ -71,7 +71,7 @@ async function exchange(code, verifier) {
 export async function AnthropicAuthPlugin({ client }) {
   return {
     "experimental.chat.system.transform": (input, output) => {
-      if (input.model.providerID === "anthropic") {
+      if (input.model?.providerID === "anthropic") {
         output.system.unshift(
           "You are Claude Code, Anthropic's official CLI for Claude.",
         );
