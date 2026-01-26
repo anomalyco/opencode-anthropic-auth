@@ -193,15 +193,17 @@ export async function AnthropicAuthPlugin({ client }) {
                 try {
                   const parsed = JSON.parse(body);
 
-                  // Sanitize system prompt - server blocks "OpenCode" string
+                  // Sanitize system prompt - server blocks "You are OpenCode" string
+                  // Only replace this specific string, not all OpenCode references
                   if (parsed.system && Array.isArray(parsed.system)) {
                     parsed.system = parsed.system.map((item) => {
                       if (item.type === "text" && item.text) {
                         return {
                           ...item,
-                          text: item.text
-                            .replace(/OpenCode/g, "Claude Code")
-                            .replace(/opencode/gi, "Claude"),
+                          text: item.text.replace(
+                            "You are OpenCode, the best coding agent on the planet.",
+                            "You are Claude Code, Anthropic's official CLI for Claude.",
+                          ),
                         };
                       }
                       return item;
