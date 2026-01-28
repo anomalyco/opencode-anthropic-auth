@@ -71,10 +71,12 @@ async function exchange(code, verifier) {
 export async function AnthropicAuthPlugin({ client }) {
   return {
     "experimental.chat.system.transform": (input, output) => {
+      const prefix =
+        "You are Claude Code, Anthropic's official CLI for Claude.";
       if (input.model?.providerID === "anthropic") {
-        output.system.unshift(
-          "You are Claude Code, Anthropic's official CLI for Claude.",
-        );
+        output.system.unshift(prefix);
+        if (output.system[1])
+          output.system[1] = prefix + "\n\n" + output.system[1];
       }
     },
     auth: {
