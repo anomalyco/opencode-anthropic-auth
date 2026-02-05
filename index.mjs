@@ -66,9 +66,13 @@ async function exchange(code, verifier) {
 }
 
 /**
- * @type {import('@opencode-ai/plugin').Plugin}
+ * build an anthropic provider plugin with the given name.
+ * 
+ * @param {string} name the provider's key (eg. 'anthropic', 'anthropic-personal', etc)
+ * @param {import('@opencode-ai/plugin').PluginInput['client']} client 
+ * @returns {Promise<Hooks>}
  */
-export async function AnthropicAuthPlugin({ client }) {
+export async function makeAnthropicProviderPlugin(name, client) {
   return {
     "experimental.chat.system.transform": (input, output) => {
       const prefix =
@@ -80,7 +84,7 @@ export async function AnthropicAuthPlugin({ client }) {
       }
     },
     auth: {
-      provider: "anthropic",
+      provider: name,
       async loader(getAuth, provider) {
         const auth = await getAuth();
         if (auth.type === "oauth") {
@@ -125,7 +129,7 @@ export async function AnthropicAuthPlugin({ client }) {
                 const json = await response.json();
                 await client.auth.set({
                   path: {
-                    id: "anthropic",
+                    id: name,
                   },
                   body: {
                     type: "oauth",
@@ -355,11 +359,18 @@ export async function AnthropicAuthPlugin({ client }) {
           },
         },
         {
-          provider: "anthropic",
+          provider: name,
           label: "Manually enter API Key",
           type: "api",
         },
       ],
     },
   };
+}
+
+/**
+ * @type {import('@opencode-ai/plugin').Plugin}
+ */
+export async function AnthropicAuthPlugin({ client }) {
+  return makeAnthropicProviderPlugin("anthropic", client);
 }
