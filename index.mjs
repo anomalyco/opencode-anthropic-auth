@@ -1,6 +1,7 @@
 import { generatePKCE } from "@openauthjs/openauth/pkce";
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const LONG_CONTEXT_BETA = "context-1m-2025-08-07";
 
 /**
  * @param {"max" | "console"} mode
@@ -95,6 +96,10 @@ export async function AnthropicAuthPlugin({ client }) {
               },
             };
           }
+          // 1M context window detection (in-memory, per session)
+          // null = unknown, true = has 1M access, false = rejected
+          let context1m = null;
+
           return {
             apiKey: "",
             /**
@@ -166,23 +171,7 @@ export async function AnthropicAuthPlugin({ client }) {
                 }
               }
 
-              // Preserve all incoming beta headers while ensuring OAuth requirements
-              const incomingBeta = requestHeaders.get("anthropic-beta") || "";
-              const incomingBetasList = incomingBeta
-                .split(",")
-                .map((b) => b.trim())
-                .filter(Boolean);
-
-              const requiredBetas = [
-                "oauth-2025-04-20",
-                "interleaved-thinking-2025-05-14",
-              ];
-              const mergedBetas = [
-                ...new Set([...requiredBetas, ...incomingBetasList]),
-              ].join(",");
-
               requestHeaders.set("authorization", `Bearer ${auth.access}`);
-              requestHeaders.set("anthropic-beta", mergedBetas);
               requestHeaders.set(
                 "user-agent",
                 "claude-cli/2.1.2 (external, cli)",
@@ -191,9 +180,15 @@ export async function AnthropicAuthPlugin({ client }) {
 
               const TOOL_PREFIX = "mcp_";
               let body = requestInit.body;
+              let eligible1m = false;
               if (body && typeof body === "string") {
                 try {
                   const parsed = JSON.parse(body);
+
+                  // Check if model supports 1M context (Opus 4+, Sonnet 4+)
+                  if (typeof parsed.model === "string") {
+                    eligible1m = /claude-(opus|sonnet)-4/i.test(parsed.model);
+                  }
 
                   // Sanitize system prompt - server blocks "OpenCode" string
                   // Note: (?<!\/) preserves paths like /path/to/opencode-foo
@@ -243,6 +238,31 @@ export async function AnthropicAuthPlugin({ client }) {
                 }
               }
 
+              // Preserve incoming beta headers while ensuring OAuth requirements
+              const incomingBeta = requestHeaders.get("anthropic-beta") || "";
+              let incomingBetasList = incomingBeta
+                .split(",")
+                .map((b) => b.trim())
+                .filter(Boolean);
+
+              const use1m = eligible1m && context1m !== false;
+              if (!use1m) {
+                incomingBetasList = incomingBetasList.filter(
+                  (b) => b !== LONG_CONTEXT_BETA,
+                );
+              }
+
+              const requiredBetas = [
+                "oauth-2025-04-20",
+                "interleaved-thinking-2025-05-14",
+              ];
+              if (use1m) requiredBetas.push(LONG_CONTEXT_BETA);
+
+              requestHeaders.set(
+                "anthropic-beta",
+                [...new Set([...requiredBetas, ...incomingBetasList])].join(","),
+              );
+
               let requestInput = input;
               let requestUrl = null;
               try {
@@ -267,11 +287,55 @@ export async function AnthropicAuthPlugin({ client }) {
                     : requestUrl;
               }
 
-              const response = await fetch(requestInput, {
+              let response = await fetch(requestInput, {
                 ...requestInit,
                 body,
                 headers: requestHeaders,
               });
+
+              // 1M context probe: detect rejection and retry without the header
+              if (
+                use1m &&
+                context1m !== false &&
+                (response.status === 400 || response.status === 403)
+              ) {
+                let msg = "";
+                try {
+                  const json = await response.clone().json();
+                  msg = (json?.error?.message || "").toLowerCase();
+                } catch {
+                  try {
+                    msg = (await response.clone().text()).toLowerCase();
+                  } catch {}
+                }
+                if (
+                  msg.includes("long context beta") &&
+                  (msg.includes("incompatible") ||
+                    msg.includes("not yet available") ||
+                    msg.includes("not available"))
+                ) {
+                  context1m = false;
+                  // Rebuild headers without the 1M beta and retry
+                  requestHeaders.set(
+                    "anthropic-beta",
+                    (requestHeaders.get("anthropic-beta") || "")
+                      .split(",")
+                      .map((b) => b.trim())
+                      .filter((b) => b && b !== LONG_CONTEXT_BETA)
+                      .join(","),
+                  );
+                  response = await fetch(requestInput, {
+                    ...requestInit,
+                    body,
+                    headers: requestHeaders,
+                  });
+                }
+              }
+
+              // Mark 1M access confirmed on first successful eligible request
+              if (response.ok && eligible1m && context1m === null) {
+                context1m = true;
+              }
 
               // Transform streaming response to rename tools back
               if (response.body) {
